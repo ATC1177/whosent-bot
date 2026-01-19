@@ -113,9 +113,7 @@ def init_db():
         try:
             cur.execute("ALTER TABLE users ADD COLUMN lang TEXT DEFAULT 'ru';")
         except Exception:
-            # sqlite on some versions may not allow; ignore if fails
             pass
-    # other tables
     cur.execute("""
     CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -170,7 +168,7 @@ def db_execute(query, params=(), fetchone=False, fetchall=False, commit=False):
     con.close()
     return result
 
-# ---------------- DB helpers ----------------
+# ---------------- helpers ----------------
 def ensure_user_record(user_id: int, username: str = None, first_name: str = None):
     now = int(time.time())
     row = db_execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,), fetchone=True)
@@ -192,7 +190,6 @@ def get_user_lang(user_id: int):
         return r[0]
     return "ru"
 
-# ---------------- small i18n helper ----------------
 def t(user_id: int, key: str, **kwargs):
     lang = get_user_lang(user_id)
     txt = TEXTS.get(lang, TEXTS["ru"]).get(key, "")
@@ -203,7 +200,6 @@ def t(user_id: int, key: str, **kwargs):
             return txt
     return txt
 
-# ---------------- utilities ----------------
 def safe_send(user_id: int, text: str, reply_markup=None, parse_mode=None):
     try:
         return bot.send_message(user_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
@@ -230,7 +226,7 @@ def make_receiver_keyboard(message_id, user_id_for_lang=None):
     kb.add(types.InlineKeyboardButton("🚫 " + ("Пожаловаться" if get_user_lang(user_id_for_lang)=="ru" else "Report"), callback_data=f"report:{message_id}"))
     return kb
 
-# ---------------- message DB helpers (same as before) ----------------
+# ---------------- message DB helpers ----------------
 def create_visit(visitor_id: int, target_id: int):
     ts = int(time.time())
     db_execute("INSERT INTO visits (visitor_id, target_id, created_at) VALUES (?, ?, ?)", (visitor_id, target_id, ts), commit=True)
@@ -279,7 +275,7 @@ def get_stats_for_user(user_id: int):
         "unique_senders": unique_senders
     }
 
-# ---------------- Handlers ----------------
+# ---------------- handlers (same as earlier, localized) ----------------
 @dp.message_handler(commands=["start"])
 def cmd_start(message: types.Message):
     args = message.get_args()
@@ -305,10 +301,6 @@ def cmd_start(message: types.Message):
         message.answer(t(uid, "own_link"))
         return
 
-    # prepare to send anonymous
-    # store pending target
-    # we'll accept next text message as content
-    # keep state in memory
     global pending_send_for_target
     pending_send_for_target[uid] = target_id
     message.answer(t(uid, "prompt_write_msg"))
@@ -366,7 +358,6 @@ def cb_menu(call: types.CallbackQuery):
             bot.send_message(uid, t(uid, "default_reply"))
         call.answer()
     elif cmd == "lang":
-        # open language picker
         kb = types.InlineKeyboardMarkup(row_width=2)
         kb.add(types.InlineKeyboardButton("Русский", callback_data="setlang:ru"),
                types.InlineKeyboardButton("English", callback_data="setlang:en"))
@@ -378,7 +369,6 @@ def text_handler(message: types.Message):
     uid = message.from_user.id
     text = message.text.strip()
 
-    # idea flow
     if pending_idea_from_user.get(uid):
         pending_idea_from_user.pop(uid, None)
         save_idea(uid, text)
@@ -388,7 +378,6 @@ def text_handler(message: types.Message):
         message.answer(t(uid, "idea_sent"))
         return
 
-    # reply flow if waiting
     if uid in pending_reply_for_message:
         message_id = pending_reply_for_message.pop(uid)
         db_msg = get_message_by_id(message_id)
@@ -407,7 +396,6 @@ def text_handler(message: types.Message):
             message.answer("Failed to send reply.")
         return
 
-    # send anonymous message flow (user came by link earlier)
     if uid in pending_send_for_target:
         target_id = pending_send_for_target.pop(uid)
         sender_username = message.from_user.username or None
@@ -421,10 +409,8 @@ def text_handler(message: types.Message):
             logger.info(f"Message #{mid} saved but deliver failed.")
         return
 
-    # default
     message.answer(t(uid, "default_reply"))
 
-# callback handlers for reply/reveal/report/share (basic translations)
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith("share:"))
 def cb_share(call: types.CallbackQuery):
     try:
@@ -502,7 +488,6 @@ def handle_report_text(message: types.Message):
         safe_send(ADMIN_ID, report_text)
     message.answer(t(message.from_user.id, "report_ok"))
 
-# ---------------- Admin commands ----------------
 @dp.message_handler(commands=["stats"])
 def cmd_stats(message: types.Message):
     if message.from_user.id != ADMIN_ID:
@@ -527,9 +512,7 @@ def cmd_admin_ideas(message: types.Message):
         out.append(f"#{r[0]} {when} — from {r[1]}\n{r[2][:200]}")
     message.answer("\n\n".join(out))
 
-# ---------------- start ----------------
 if __name__ == "__main__":
     init_db()
     logger.info("Starting Whosent bot...")
     executor.start_polling(dp, skip_updates=True)
-
