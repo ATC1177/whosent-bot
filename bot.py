@@ -26,12 +26,12 @@ load_dotenv()
 # ----------------------------
 # CONFIG (через .env)
 # ----------------------------
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # ОБЯЗАТЕЛЬНО: положи сюда свой токен через .env
-ADMIN_ID = int(os.getenv("ADMIN_ID", "6992171884"))          # по-умолчанию установлено из твоих данных
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "ATC03")
-BOT_USERNAME = os.getenv("BOT_USERNAME", "whosent_bot")
-SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "metopo")
-REVEAL_PRICE_STARS = int(os.getenv("REVEAL_PRICE_STARS", "25"))
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME")
+BOT_USERNAME = os.getenv("BOT_USERNAME")
+SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME")
+REVEAL_PRICE_STARS = int(os.getenv("REVEAL_PRICE_STARS"))
 DB_PATH = os.getenv("DB_PATH", "anon_bot.db")
 
 # ----------------------------
