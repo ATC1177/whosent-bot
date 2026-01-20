@@ -1,99 +1,185 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Whosent bot with simple i18n (ru/en) — aiogram v2 polling
+"""
+Whosent bot (aiogram v3) — single-file implementation.
+
+Requirements:
+  aiogram==3.22.0
+  aiohttp==3.12.15
+  python-dotenv==1.0.0
+
+.env file (example):
+  BOT_TOKEN=...
+  ADMIN_ID=6992171884
+  ADMIN_USERNAME=ATC03
+  BOT_USERNAME=whosent_bot
+  SUPPORT_USERNAME=metopo
+  REVEAL_PRICE_STARS=25
+  DB_PATH=anon_bot.db
+"""
 
 import os
+import sqlite3
 import time
 import logging
-import sqlite3
 from datetime import datetime, timezone
 
-from aiogram import Bot, Dispatcher, executor, types
-from aiogram.utils.exceptions import BotBlocked, ChatNotFound, UserDeactivated
 from dotenv import load_dotenv
+
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 load_dotenv()
 
-# ---------------- CONFIG ----------------
+# ----------------------------
+# CONFIG (from .env)
+# ----------------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID") or 0)
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME") or ""
-BOT_USERNAME = os.getenv("BOT_USERNAME") or ""
-SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME") or ""
-REVEAL_PRICE_STARS = int(os.getenv("REVEAL_PRICE_STARS") or 25)
-DB_PATH = os.getenv("DB_PATH") or "anon_bot.db"
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "whosent_bot")
+SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "")
+REVEAL_PRICE_STARS = int(os.getenv("REVEAL_PRICE_STARS", "25"))
+DB_PATH = os.getenv("DB_PATH", "anon_bot.db")
 
 if not BOT_TOKEN:
-    raise SystemExit("BOT_TOKEN not set")
+    raise SystemExit("BOT_TOKEN is required in .env")
 
-# ---------------- logging & bot ----------------
+# ----------------------------
+# Logging
+# ----------------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
+# ----------------------------
+# Bot & Dispatcher
+# ----------------------------
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(bot)
+dp = Dispatcher()
 
-# ---------------- i18n texts ----------------
-TEXTS = {
-    "ru": {
-        "start_main": "Начните получать анонимные сообщения прямо сейчас.\n\n"
-                      "Ваша персональная ссылка — поделитесь ею в профиле Telegram, Instagram, TikTok, в сторис и т.д.\n\n"
-                      "Ваша ссылка:\n{link}\n\n"
-                      "Разместите ссылку в профиле — люди смогут писать вам анонимно.",
-        "prompt_write_msg": "✉️ Напишите анонимное сообщение для этого пользователя. Ваш username не будет показан (пока получатель не раскроет).",
-        "invalid_link": "Неправильная ссылка.",
-        "own_link": "Это ваша собственная ссылка — напишите что-нибудь для теста или поделитесь ссылкой.",
-        "sent_ok": "✅ Сообщение отправлено анонимно. Если получатель ответит, ответ придёт через бота.",
-        "new_msg_notify": "📩 У вас новое анонимное сообщение:\n\n{text}\n\nЧтобы раскрыть отправителя — нажмите «⭐ Раскрыть ({price}★)».\nВы также можете ответить через бота.",
-        "menu_title": "Меню:",
-        "menu_stats": "📊 Статистика",
-        "menu_idea": "💡 Предложить идею",
-        "menu_support": "🛠 Техподдержка",
-        "idea_prompt": "Опишите вашу идею для бота (коротко):",
-        "idea_sent": "✅ Идея отправлена администратору. Спасибо!",
-        "support_text": "Техподдержка: https://t.me/{support}\n\nНапишите этому пользователю в случае проблем.",
-        "reply_prompt": "Напишите ответ — он будет отправлен отправителю анонимно:",
-        "reveal_confirm": "Вы собираетесь раскрыть отправителя (стоимость {price}★).\n\nВ демо-версии оплата симулируется. В проде здесь нужно подключить реальную оплату.",
-        "revealed_username": "👤 Отправитель раскрыт:\n\nИмя: {name}\nUsername: @{username}\n\nНажмите, чтобы открыть профиль:",
-        "revealed_hidden": "Отправитель раскрыт (username скрыт).",
-        "report_prompt": "Опишите причину жалобы (коротко):",
-        "report_ok": "Спасибо — жалоба принята, администратор получит уведомление.",
-        "lang_choose": "Выберите язык / Choose language:",
-        "lang_set": "Язык установлен: {lang}",
-        "default_reply": "Я — бот для анонимных сообщений. Чтобы получить свою ссылку — отправь /start\n\nИли нажми '📋 Меню'."
+# ----------------------------
+# In-memory states (simple)
+# ----------------------------
+pending_send_for_target = {}         # sender_id -> target_id
+pending_reply_for_message = {}       # replier_id -> message_id
+pending_idea_from_user = {}          # user_id -> True (user is entering idea text)
+pending_appeal_from_user = {}        # user_id -> True (entering appeal text)
+
+# ----------------------------
+# Translations (all texts duplicated ru/en)
+# Keys used throughout the code
+# ----------------------------
+TEXT = {
+    "welcome": {
+        "ru": "👋 Добро пожаловать!\n\nВыберите язык / Choose language:",
+        "en": "👋 Welcome!\n\nPlease choose language / Пожалуйста, выберите язык:"
     },
-    "en": {
-        "start_main": "Start receiving anonymous messages right now.\n\n"
-                      "Your personal link — share it in your Telegram, Instagram, TikTok profile, Stories, etc.\n\n"
-                      "Your link:\n{link}\n\n"
-                      "Place the link in your profile so people can write to you anonymously.",
-        "prompt_write_msg": "✉️ Write an anonymous message to this user. Your username will not be shown (unless revealed).",
-        "invalid_link": "Invalid link.",
-        "own_link": "This is your own link — write something for testing or share the link.",
-        "sent_ok": "✅ Message sent anonymously. If the recipient replies, the reply will arrive through the bot.",
-        "new_msg_notify": "📩 You have a new anonymous message:\n\n{text}\n\nTo reveal the sender — press «⭐ Reveal ({price}★)». You can also reply via the bot.",
-        "menu_title": "Menu:",
-        "menu_stats": "📊 Statistics",
-        "menu_idea": "💡 Suggest an idea",
-        "menu_support": "🛠 Support",
-        "idea_prompt": "Describe your idea for the bot (short):",
-        "idea_sent": "✅ Idea sent to admin. Thanks!",
-        "support_text": "Support: https://t.me/{support}\n\nContact this person in case of issues.",
-        "reply_prompt": "Write your reply — it will be sent to the sender anonymously:",
-        "reveal_confirm": "You are about to reveal the sender (cost {price}★).\n\nIn demo this is simulated. In production you need to connect real payment.",
-        "revealed_username": "👤 Sender revealed:\n\nName: {name}\nUsername: @{username}\n\nClick to open profile:",
-        "revealed_hidden": "Sender revealed (username hidden).",
-        "report_prompt": "Describe the reason for the report (short):",
-        "report_ok": "Thanks — report accepted, admin will be notified.",
-        "lang_choose": "Выберите язык / Choose language:",
-        "lang_set": "Language set to: {lang}",
-        "default_reply": "I am an anonymous messaging bot. To get your link — send /start\n\nOr press '📋 Menu'."
+    "choose_lang": {
+        "ru": "Выберите язык:",
+        "en": "Choose language:"
+    },
+    "start_onboarding": {
+        "ru": "Начните получать анонимные сообщения прямо сейчас.\n\nВаша персональная ссылка:\n{link}\n\nРазместите ссылку в профиле — люди смогут писать вам анонимно.",
+        "en": "Start receiving anonymous messages right now.\n\nYour personal link:\n{link}\n\nPlace the link in your profile so people can message you anonymously."
+    },
+    "enter_message_prompt": {
+        "ru": "✉️ Напишите анонимное сообщение для этого пользователя. Ваш username не будет показан, если получатель не раскроет отправителя.",
+        "en": "✉️ Write an anonymous message to this user. Your username will not be shown unless the recipient reveals the sender."
+    },
+    "message_sent_confirm": {
+        "ru": "✅ Сообщение отправлено анонимно. Если получатель ответит, ответ придёт через бота.",
+        "en": "✅ Message sent anonymously. If the recipient replies, the reply will come via the bot."
+    },
+    "new_msg_to_receiver": {
+        "ru": "📩 У вас новое анонимное сообщение:\n\n{text}\n\nВы можете ответить бесплатно или пожаловаться.",
+        "en": "📩 You have a new anonymous message:\n\n{text}\n\nYou can reply for free or report it."
+    },
+    "reply_request": {
+        "ru": "Напишите ответ — он будет отправлен отправителю анонимно:",
+        "en": "Write your reply — it will be sent to the sender anonymously:"
+    },
+    "reply_notification_to_sender": {
+        "ru": "📨 На ваше сообщение ответили:\n\n{reply}",
+        "en": "📨 Your message received a reply:\n\n{reply}"
+    },
+    "report_reason_prompt": {
+        "ru": "Опишите причину жалобы (коротко):",
+        "en": "Describe the reason for the report (brief):"
+    },
+    "report_received_user": {
+        "ru": "Спасибо — ваша жалоба принята.",
+        "en": "Thank you — your report has been received."
+    },
+    "report_admin_notify": {
+        "ru": "🚨 Жалоба на сообщение #{mid}\nОтправитель (ID): {sender_id}\nUsername: {username}\nТекст: {preview}\nПричина: {reason}\nОт: {reporter}",
+        "en": "🚨 Report on message #{mid}\nSender (ID): {sender_id}\nUsername: {username}\nText: {preview}\nReason: {reason}\nFrom: {reporter}"
+    },
+    "block_confirm_admin": {
+        "ru": "Пользователь {uid} заблокирован.",
+        "en": "User {uid} blocked."
+    },
+    "unblock_confirm_admin": {
+        "ru": "Пользователь {uid} разблокирован.",
+        "en": "User {uid} unblocked."
+    },
+    "ban_confirm_admin": {
+        "ru": "Пользователь {uid} забанен навсегда.",
+        "en": "User {uid} permanently banned."
+    },
+    "you_blocked": {
+        "ru": "🚫 Вы временно заблокированы и не можете отправлять сообщения. У вас есть одна попытка подать апелляцию.",
+        "en": "🚫 You are temporarily blocked and cannot send messages. You have one chance to file an appeal."
+    },
+    "you_banned": {
+        "ru": "⛔ Вы заблокированы навсегда. Апелляции невозможны.",
+        "en": "⛔ You are permanently banned. No appeals possible."
+    },
+    "appeal_prompt": {
+        "ru": "Напишите вашу апелляцию (одна попытка):",
+        "en": "Write your appeal (one attempt):"
+    },
+    "appeal_received_user": {
+        "ru": "Ваша апелляция отправлена администратору.",
+        "en": "Your appeal has been sent to the administrator."
+    },
+    "appeal_admin_notify": {
+        "ru": "📝 Апелляция от {uid}\nUsername: {username}\nТекст:\n{appeal}",
+        "en": "📝 Appeal from {uid}\nUsername: {username}\nText:\n{appeal}"
+    },
+    "lang_changed": {
+        "ru": "✅ Язык сохранён.",
+        "en": "✅ Language saved."
+    },
+    "invalid_link": {
+        "ru": "Неправильная ссылка.",
+        "en": "Invalid link."
+    },
+    "menu_text": {
+        "ru": "Меню:",
+        "en": "Menu:"
+    },
+    "stats_text": {
+        "ru": "📈 Статистика:\nЗа сегодня: • сообщений: {m_today} • переходов: {v_today}\nЗа всё время: • сообщений: {m_total} • переходов: {v_total} • уникальных отправителей: {unique}",
+        "en": "📈 Statistics:\nToday: • messages: {m_today} • visits: {v_today}\nAll time: • messages: {m_total} • visits: {v_total} • unique senders: {unique}"
+    },
+    "idea_prompt": {
+        "ru": "Опишите вашу идею для бота (коротко):",
+        "en": "Describe your idea for the bot (brief):"
+    },
+    "idea_thanks": {
+        "ru": "Спасибо! Ваша идея отправлена администраторам.",
+        "en": "Thanks! Your idea has been sent to the administrators."
+    },
+    "reveal_prompt": {
+        "ru": "⭐ Раскрыть отправителя стоит {price}★ (симуляция).",
+        "en": "⭐ Reveal sender costs {price}★ (simulation)."
     }
 }
 
-LANG_NAMES = {"ru": "Русский", "en": "English"}
-
-# ---------------- DB ----------------
+# ----------------------------
+# Database (SQLite)
+# ----------------------------
 def init_db():
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
@@ -102,18 +188,11 @@ def init_db():
         user_id INTEGER PRIMARY KEY,
         username TEXT,
         first_name TEXT,
+        language TEXT DEFAULT 'ru',
         messages_received INTEGER DEFAULT 0,
-        created_at INTEGER
+        appealed INTEGER DEFAULT 0
     );
     """)
-    # if lang column missing, add it
-    cur.execute("PRAGMA table_info(users);")
-    cols = [r[1] for r in cur.fetchall()]
-    if "lang" not in cols:
-        try:
-            cur.execute("ALTER TABLE users ADD COLUMN lang TEXT DEFAULT 'ru';")
-        except Exception:
-            pass
     cur.execute("""
     CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -151,6 +230,23 @@ def init_db():
         created_at INTEGER
     );
     """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS blocked (
+        user_id INTEGER PRIMARY KEY,
+        reason TEXT,
+        blocked_at INTEGER,
+        permanently INTEGER DEFAULT 0
+    );
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS appeals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        text TEXT,
+        created_at INTEGER,
+        processed INTEGER DEFAULT 0
+    );
+    """)
     con.commit()
     con.close()
 
@@ -168,351 +264,491 @@ def db_execute(query, params=(), fetchone=False, fetchall=False, commit=False):
     con.close()
     return result
 
-# ---------------- helpers ----------------
-def ensure_user_record(user_id: int, username: str = None, first_name: str = None):
-    now = int(time.time())
+# ----------------------------
+# DB helpers
+# ----------------------------
+def ensure_user(user_id, username=None, first_name=None):
     row = db_execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,), fetchone=True)
     if not row:
-        db_execute("INSERT INTO users (user_id, username, first_name, messages_received, created_at, lang) VALUES (?, ?, ?, 0, ?, ?)",
-                   (user_id, username, first_name or "", now, "ru"), commit=True)
+        db_execute("INSERT INTO users (user_id, username, first_name) VALUES (?, ?, ?)",
+                   (user_id, username, first_name or ""), commit=True)
     else:
         db_execute("UPDATE users SET username = ?, first_name = ? WHERE user_id = ?",
                    (username, first_name or "", user_id), commit=True)
 
-def set_user_lang(user_id: int, lang: str):
-    if lang not in TEXTS:
-        return
-    db_execute("UPDATE users SET lang = ? WHERE user_id = ?", (lang, user_id), commit=True)
+def set_user_language(user_id, lang):
+    db_execute("UPDATE users SET language = ? WHERE user_id = ?", (lang, user_id), commit=True)
 
-def get_user_lang(user_id: int):
-    r = db_execute("SELECT lang FROM users WHERE user_id = ?", (user_id,), fetchone=True)
-    if r and r[0]:
-        return r[0]
-    return "ru"
+def get_user_language(user_id):
+    row = db_execute("SELECT language FROM users WHERE user_id = ?", (user_id,), fetchone=True)
+    return row[0] if row else "ru"
 
-def t(user_id: int, key: str, **kwargs):
-    lang = get_user_lang(user_id)
-    txt = TEXTS.get(lang, TEXTS["ru"]).get(key, "")
-    if kwargs:
-        try:
-            return txt.format(**kwargs)
-        except Exception:
-            return txt
-    return txt
-
-def safe_send(user_id: int, text: str, reply_markup=None, parse_mode=None):
-    try:
-        return bot.send_message(user_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
-    except (BotBlocked, ChatNotFound, UserDeactivated) as e:
-        logger.warning(f"Failed to send to {user_id}: {e}")
-        return None
-    except Exception as e:
-        logger.exception(f"Error sending to {user_id}: {e}")
-        return None
-
-def make_onboarding_keyboard(user_id: int, personal_link: str):
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(types.InlineKeyboardButton("🔗 " + ("Скопировать ссылку" if get_user_lang(user_id)=="ru" else "Copy link"), url=personal_link))
-    kb.add(types.InlineKeyboardButton("🔁 " + ("Поделиться" if get_user_lang(user_id)=="ru" else "Share"), callback_data=f"share:{user_id}"))
-    kb.add(types.InlineKeyboardButton("📋 " + ("Меню" if get_user_lang(user_id)=="ru" else "Menu"), callback_data="menu:open"))
-    return kb
-
-def make_receiver_keyboard(message_id, user_id_for_lang=None):
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        types.InlineKeyboardButton(("💬 Ответить анонимно" if (get_user_lang(user_id_for_lang)=="ru") else "💬 Reply anonymously"), callback_data=f"reply:{message_id}"),
-        types.InlineKeyboardButton(f"⭐ {('Раскрыть' if get_user_lang(user_id_for_lang)=='ru' else 'Reveal')} ({REVEAL_PRICE_STARS}★)", callback_data=f"reveal:{message_id}")
-    )
-    kb.add(types.InlineKeyboardButton("🚫 " + ("Пожаловаться" if get_user_lang(user_id_for_lang)=="ru" else "Report"), callback_data=f"report:{message_id}"))
-    return kb
-
-# ---------------- message DB helpers ----------------
-def create_visit(visitor_id: int, target_id: int):
+def create_visit(visitor_id, target_id):
     ts = int(time.time())
-    db_execute("INSERT INTO visits (visitor_id, target_id, created_at) VALUES (?, ?, ?)", (visitor_id, target_id, ts), commit=True)
+    db_execute("INSERT INTO visits (visitor_id, target_id, created_at) VALUES (?, ?, ?)",
+               (visitor_id, target_id, ts), commit=True)
 
-def create_message_record(sender_id, sender_username, sender_first_name, receiver_id, text):
+def create_message(sender_id, sender_username, sender_first_name, receiver_id, text):
     ts = int(time.time())
     db_execute("INSERT INTO messages (sender_id, sender_username, sender_first_name, receiver_id, text, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                (sender_id, sender_username, sender_first_name, receiver_id, text, ts), commit=True)
-    ensure_user_record(receiver_id)
     db_execute("UPDATE users SET messages_received = messages_received + 1 WHERE user_id = ?", (receiver_id,), commit=True)
     res = db_execute("SELECT last_insert_rowid()", fetchone=True)
     return res[0]
 
-def get_message_by_id(message_id):
-    return db_execute("SELECT id, sender_id, sender_username, sender_first_name, receiver_id, text, revealed, created_at FROM messages WHERE id = ?", (message_id,), fetchone=True)
+def get_message(mid):
+    return db_execute("SELECT id, sender_id, sender_username, sender_first_name, receiver_id, text, revealed, created_at FROM messages WHERE id = ?", (mid,), fetchone=True)
 
-def set_message_revealed(message_id):
-    db_execute("UPDATE messages SET revealed = 1 WHERE id = ?", (message_id,), commit=True)
-
-def save_report(message_id, reporter_id, reason):
+def add_report(message_id, reporter_id, reason):
     ts = int(time.time())
-    db_execute("INSERT INTO reports (message_id, reporter_id, reason, created_at) VALUES (?, ?, ?, ?)", (message_id, reporter_id, reason, ts), commit=True)
+    db_execute("INSERT INTO reports (message_id, reporter_id, reason, created_at) VALUES (?, ?, ?, ?)",
+               (message_id, reporter_id, reason, ts), commit=True)
+
+def count_unique_reports_against_sender(sender_id):
+    # count distinct reporter_id for messages by sender_id
+    rows = db_execute("""
+        SELECT COUNT(DISTINCT r.reporter_id)
+        FROM reports r
+        JOIN messages m ON r.message_id = m.id
+        WHERE m.sender_id = ?
+    """, (sender_id,), fetchone=True)
+    return rows[0] if rows else 0
+
+def get_reports_for_sender(sender_id):
+    rows = db_execute("""
+        SELECT r.id, r.message_id, r.reporter_id, r.reason, r.created_at, m.text
+        FROM reports r
+        JOIN messages m ON r.message_id = m.id
+        WHERE m.sender_id = ?
+        ORDER BY r.created_at DESC
+    """, (sender_id,), fetchall=True)
+    return rows or []
+
+def block_user(user_id, reason="", permanent=0):
+    ts = int(time.time())
+    db_execute("INSERT OR REPLACE INTO blocked (user_id, reason, blocked_at, permanently) VALUES (?, ?, ?, ?)",
+               (user_id, reason, ts, permanent), commit=True)
+
+def unblock_user(user_id):
+    db_execute("DELETE FROM blocked WHERE user_id = ?", (user_id,), commit=True)
+
+def is_blocked(user_id):
+    row = db_execute("SELECT user_id, permanently FROM blocked WHERE user_id = ?", (user_id,), fetchone=True)
+    return (True, bool(row[1])) if row else (False, False)
+
+def save_appeal(user_id, text):
+    ts = int(time.time())
+    db_execute("INSERT INTO appeals (user_id, text, created_at) VALUES (?, ?, ?)", (user_id, text, ts), commit=True)
+    res = db_execute("SELECT last_insert_rowid()", fetchone=True)
+    return res[0]
+
+def get_unprocessed_appeals():
+    return db_execute("SELECT id, user_id, text, created_at FROM appeals WHERE processed = 0", fetchall=True) or []
+
+def mark_appeal_processed(appeal_id):
+    db_execute("UPDATE appeals SET processed = 1 WHERE id = ?", (appeal_id,), commit=True)
 
 def save_idea(from_user, text):
     ts = int(time.time())
     db_execute("INSERT INTO ideas (from_user, text, created_at) VALUES (?, ?, ?)", (from_user, text, ts), commit=True)
 
-# ---------------- stats helpers ----------------
-def _start_of_today_ts():
-    now = datetime.now(timezone.utc)
-    start = datetime(year=now.year, month=now.month, day=now.day, tzinfo=timezone.utc)
-    return int(start.timestamp())
+def get_stats(user_id):
+    start_today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    m_today = db_execute("SELECT COUNT(*) FROM messages WHERE receiver_id = ? AND created_at >= ?", (user_id, int(start_today)), fetchone=True)[0]
+    m_total = db_execute("SELECT COUNT(*) FROM messages WHERE receiver_id = ?", (user_id,), fetchone=True)[0]
+    v_today = db_execute("SELECT COUNT(*) FROM visits WHERE target_id = ? AND created_at >= ?", (user_id, int(start_today)), fetchone=True)[0]
+    v_total = db_execute("SELECT COUNT(*) FROM visits WHERE target_id = ?", (user_id,), fetchone=True)[0]
+    unique = db_execute("SELECT COUNT(DISTINCT sender_id) FROM messages WHERE receiver_id = ?", (user_id,), fetchone=True)[0]
+    return {"m_today": m_today, "m_total": m_total, "v_today": v_today, "v_total": v_total, "unique": unique}
 
-def get_stats_for_user(user_id: int):
-    start_today = _start_of_today_ts()
-    messages_today = db_execute("SELECT COUNT(*) FROM messages WHERE receiver_id = ? AND created_at >= ?", (user_id, start_today), fetchone=True)[0]
-    messages_total = db_execute("SELECT COUNT(*) FROM messages WHERE receiver_id = ?", (user_id,), fetchone=True)[0]
-    visits_today = db_execute("SELECT COUNT(*) FROM visits WHERE target_id = ? AND created_at >= ?", (user_id, start_today), fetchone=True)[0]
-    visits_total = db_execute("SELECT COUNT(*) FROM visits WHERE target_id = ?", (user_id,), fetchone=True)[0]
-    unique_senders = db_execute("SELECT COUNT(DISTINCT sender_id) FROM messages WHERE receiver_id = ?", (user_id,), fetchone=True)[0]
-    return {
-        "messages_today": messages_today,
-        "messages_total": messages_total,
-        "visits_today": visits_today,
-        "visits_total": visits_total,
-        "unique_senders": unique_senders
-    }
+# ----------------------------
+# Utilities
+# ----------------------------
+def t(key, user_id=None, **kwargs):
+    # translation helper: t("welcome", user_id)
+    lang = "ru"
+    if user_id:
+        try:
+            lang = get_user_language(user_id)
+        except Exception:
+            lang = "ru"
+    txt = TEXT.get(key, {}).get(lang, "")
+    if kwargs:
+        return txt.format(**kwargs)
+    return txt
 
-# ---------------- handlers (same as earlier, localized) ----------------
-@dp.message_handler(commands=["start"])
-def cmd_start(message: types.Message):
+async def safe_send(user_id: int, text: str, reply_markup=None, parse_mode=None):
+    try:
+        return await bot.send_message(user_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception as e:
+        logger.warning("Failed to send to %s: %s", user_id, e)
+        return None
+
+def make_lang_keyboard():
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(InlineKeyboardButton("🇷🇺 Русский", callback_data="lang:ru"),
+           InlineKeyboardButton("🇬🇧 English", callback_data="lang:en"))
+    return kb
+
+def make_onboarding_kb(user_id, personal_link):
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(InlineKeyboardButton("🔗 Открыть / Копировать ссылку", url=personal_link))
+    kb.add(InlineKeyboardButton("🔁 Поделиться ссылкой", callback_data=f"share:{user_id}"))
+    kb.add(InlineKeyboardButton("📋 Меню", callback_data="menu:open"))
+    return kb
+
+def make_receiver_kb(message_id, user_id):
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(InlineKeyboardButton("💬 Ответить", callback_data=f"reply:{message_id}"),
+           InlineKeyboardButton(f"⭐ Раскрыть ({REVEAL_PRICE_STARS}★)", callback_data=f"reveal:{message_id}"))
+    kb.add(InlineKeyboardButton("🚨 Пожаловаться", callback_data=f"report:{message_id}"))
+    # Also add a small "reply back" when sender sees reply
+    return kb
+
+def make_menu_kb(user_id):
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(InlineKeyboardButton(t("menu_text", user_id), callback_data="menu:open"))
+    return kb
+
+# ----------------------------
+# Handlers
+# ----------------------------
+@dp.message(Command(commands=["start"]))
+async def cmd_start(message: types.Message):
     args = message.get_args()
     uid = message.from_user.id
-    ensure_user_record(uid, message.from_user.username, message.from_user.first_name)
-    me = bot.get_me()
-    bot_username = me.username or BOT_USERNAME
-    personal_link = f"https://t.me/{bot_username}?start={uid}"
+    ensure_user(uid, message.from_user.username, message.from_user.first_name)
+    lang = get_user_language(uid)
 
+    # If user has no language explicitly set (default exists but check), present language selection on first visit
+    if not args and (not message.from_user.username and get_user_language(uid) is None):
+        # fallback, but normally language default is ru in DB
+        pass
+
+    # If no args => onboarding / show personal link
     if not args:
-        kb = make_onboarding_keyboard(uid, personal_link)
-        message.answer(t(uid, "start_main", link=personal_link), reply_markup=kb)
+        # If user has not set language yet (or wants), show language choice first if language not set in DB
+        lang_row = db_execute("SELECT language FROM users WHERE user_id = ?", (uid,), fetchone=True)
+        lang_in_db = lang_row[0] if lang_row else None
+        if not lang_in_db:
+            await message.answer(t("welcome"), reply_markup=make_lang_keyboard())
+            return
+        me = await bot.get_me()
+        personal_link = f"https://t.me/{me.username}?start={uid}"
+        await message.answer(t("start_onboarding", uid, link=personal_link), reply_markup=make_onboarding_kb(uid, personal_link))
         return
 
+    # args present -> deep link
     try:
         target_id = int(args)
     except ValueError:
-        message.answer(t(uid, "invalid_link"))
+        await message.answer(t("invalid_link", uid))
         return
 
+    # record visit
     create_visit(uid, target_id)
+
     if target_id == uid:
-        message.answer(t(uid, "own_link"))
+        await message.answer(t("start_onboarding", uid, link=f"https://t.me/{BOT_USERNAME}?start={uid}"))
         return
 
-    global pending_send_for_target
-    pending_send_for_target[uid] = target_id
-    message.answer(t(uid, "prompt_write_msg"))
-
-@dp.message_handler(commands=["menu"])
-def cmd_menu(message: types.Message):
-    uid = message.from_user.id
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(types.InlineKeyboardButton(t(uid, "menu_stats"), callback_data="menu:stats"))
-    kb.add(types.InlineKeyboardButton(t(uid, "menu_idea"), callback_data="menu:idea"))
-    kb.add(types.InlineKeyboardButton(t(uid, "menu_support"), callback_data="menu:support"))
-    kb.add(types.InlineKeyboardButton(("🌐 " + ("English" if get_user_lang(uid)=="ru" else "Русский")), callback_data="menu:lang"))
-    message.answer(t(uid, "menu_title"), reply_markup=kb)
-
-@dp.message_handler(commands=["lang"])
-def cmd_lang(message: types.Message):
-    uid = message.from_user.id
-    ensure_user_record(uid, message.from_user.username, message.from_user.first_name)
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(types.InlineKeyboardButton("Русский", callback_data="setlang:ru"),
-           types.InlineKeyboardButton("English", callback_data="setlang:en"))
-    message.answer(t(uid, "lang_choose"), reply_markup=kb)
-
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith("setlang:"))
-def cb_setlang(call: types.CallbackQuery):
-    uid = call.from_user.id
-    lang = call.data.split(":", 1)[1]
-    ensure_user_record(uid, call.from_user.username, call.from_user.first_name)
-    set_user_lang(uid, lang)
-    call.answer()
-    call.message.edit_text(t(uid, "lang_set", lang=LANG_NAMES.get(lang, lang)))
-
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith("menu:"))
-def cb_menu(call: types.CallbackQuery):
-    uid = call.from_user.id
-    cmd = call.data.split(":", 1)[1]
-    if cmd == "stats":
-        stats = get_stats_for_user(uid)
-        text = (
-            f"📈 {t(uid, 'menu_stats')}\n\n"
-            f"За сегодня:\n• {t(uid,'menu_stats')}: {stats['messages_today']}\n"
-        )
-        bot.send_message(uid, text)
-        call.answer()
-    elif cmd == "idea":
-        pending_idea_from_user[uid] = True
-        bot.send_message(uid, t(uid, "idea_prompt"))
-        call.answer()
-    elif cmd == "support":
-        if SUPPORT_USERNAME:
-            bot.send_message(uid, t(uid, "support_text", support=SUPPORT_USERNAME))
-        elif ADMIN_ID:
-            bot.send_message(uid, f"Support: {ADMIN_ID}")
-        else:
-            bot.send_message(uid, t(uid, "default_reply"))
-        call.answer()
-    elif cmd == "lang":
-        kb = types.InlineKeyboardMarkup(row_width=2)
-        kb.add(types.InlineKeyboardButton("Русский", callback_data="setlang:ru"),
-               types.InlineKeyboardButton("English", callback_data="setlang:en"))
-        bot.send_message(uid, t(uid, "lang_choose"), reply_markup=kb)
-        call.answer()
-
-@dp.message_handler(content_types=types.ContentTypes.TEXT)
-def text_handler(message: types.Message):
-    uid = message.from_user.id
-    text = message.text.strip()
-
-    if pending_idea_from_user.get(uid):
-        pending_idea_from_user.pop(uid, None)
-        save_idea(uid, text)
-        uname = f"@{message.from_user.username}" if message.from_user.username else "(username отсутствует)"
-        admin_msg = (f"💡 Новая идея\n\nПользователь: {uname}\nID: {uid}\n\n{(text[:1000]+'...') if len(text)>1000 else text}")
-        safe_send(ADMIN_ID, admin_msg)
-        message.answer(t(uid, "idea_sent"))
-        return
-
-    if uid in pending_reply_for_message:
-        message_id = pending_reply_for_message.pop(uid)
-        db_msg = get_message_by_id(message_id)
-        if not db_msg:
-            message.answer(t(uid, "default_reply"))
+    # Check if sender is blocked
+    blocked, permanent = is_blocked(uid)
+    if blocked:
+        if permanent:
+            await message.answer(t("you_banned", uid))
             return
-        sender_id = db_msg[1]
-        try:
-            bot.send_message(sender_id,
-                             f"📩 You have a reply (via bot):\n\n{text}\n\n",
-                             reply_markup=types.InlineKeyboardMarkup().add(
-                                 types.InlineKeyboardButton("💬 Reply in bot", callback_data=f"reply_to_sender:{message_id}")
-                             ))
-            message.answer("✅")
-        except Exception:
-            message.answer("Failed to send reply.")
+        else:
+            await message.answer(t("you_blocked", uid))
+            # allow appeal option
+            kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Подать апелляцию / Appeal", callback_data="appeal:start"))
+            await message.answer("", reply_markup=kb)
+            return
+
+    # Set pending state: user will write message to target
+    pending_send_for_target[uid] = target_id
+    await message.answer(t("enter_message_prompt", uid))
+
+@dp.callback_query()
+async def callbacks_handler(callback: types.CallbackQuery):
+    data = callback.data or ""
+    uid = callback.from_user.id
+
+    # LANGUAGE selection
+    if data.startswith("lang:"):
+        lang = data.split(":", 1)[1]
+        ensure_user(uid, callback.from_user.username, callback.from_user.first_name)
+        set_user_language(uid, lang)
+        await callback.message.answer(t("lang_changed", uid))
+        await callback.message.delete()
+        # After selecting language show onboarding link
+        me = await bot.get_me()
+        personal_link = f"https://t.me/{me.username}?start={uid}"
+        await callback.message.answer(t("start_onboarding", uid, link=personal_link), reply_markup=make_onboarding_kb(uid, personal_link))
+        await callback.answer()
         return
 
+    # Share link
+    if data.startswith("share:"):
+        try:
+            target_uid = int(data.split(":", 1)[1])
+        except Exception:
+            await callback.answer("Error", show_alert=True)
+            return
+        me = await bot.get_me()
+        link = f"https://t.me/{me.username}?start={target_uid}"
+        await bot.send_message(callback.from_user.id, f"Скопируйте/передайте ссылку:\n\n{link}")
+        await callback.answer()
+        return
+
+    # Menu open or options
+    if data == "menu:open":
+        kb = InlineKeyboardMarkup(row_width=1)
+        kb.add(InlineKeyboardButton("📊 Статистика / Statistics", callback_data="menu:stats"),
+               InlineKeyboardButton("💡 Предложить идею / Idea", callback_data="menu:idea"),
+               InlineKeyboardButton("🛠 Техподдержка / Support", callback_data="menu:support"),
+               InlineKeyboardButton("⚙️ Настройки / Settings", callback_data="menu:settings"))
+        await bot.send_message(callback.from_user.id, t("menu_text", callback.from_user.id), reply_markup=kb)
+        await callback.answer()
+        return
+
+    # Menu stats
+    if data == "menu:stats":
+        stats = get_stats(callback.from_user.id)
+        await bot.send_message(callback.from_user.id, t("stats_text", callback.from_user.id,
+                                                        m_today=stats["m_today"],
+                                                        v_today=stats["v_today"],
+                                                        m_total=stats["m_total"],
+                                                        v_total=stats["v_total"],
+                                                        unique=stats["unique"]))
+        await callback.answer()
+        return
+
+    # Menu idea
+    if data == "menu:idea":
+        pending_idea_from_user[callback.from_user.id] = True
+        await bot.send_message(callback.from_user.id, t("idea_prompt", callback.from_user.id))
+        await callback.answer()
+        return
+
+    # Support
+    if data == "menu:support":
+        if SUPPORT_USERNAME:
+            await bot.send_message(callback.from_user.id, f"Support: https://t.me/{SUPPORT_USERNAME}")
+        else:
+            await bot.send_message(callback.from_user.id, "Support not set")
+        await callback.answer()
+        return
+
+    # Settings -> language
+    if data == "menu:settings":
+        kb = InlineKeyboardMarkup(row_width=2)
+        kb.add(InlineKeyboardButton("🇷🇺 Русский", callback_data="lang:ru"),
+               InlineKeyboardButton("🇬🇧 English", callback_data="lang:en"))
+        await bot.send_message(callback.from_user.id, t("choose_lang", callback.from_user.id), reply_markup=kb)
+        await callback.answer()
+        return
+
+    # Reply to message (receiver wants to reply to sender)
+    if data.startswith("reply:"):
+        try:
+            mid = int(data.split(":", 1)[1])
+        except:
+            await callback.answer("Error", show_alert=True)
+            return
+        # mark pending reply
+        pending_reply_for_message[callback.from_user.id] = mid
+        await bot.send_message(callback.from_user.id, t("reply_request", callback.from_user.id))
+        await callback.answer()
+        return
+
+    # When sender sees "reply_to_sender" button -> they can reply back
+    if data.startswith("reply_to_sender:"):
+        try:
+            mid = int(data.split(":", 1)[1])
+        except:
+            await callback.answer("Error", show_alert=True)
+            return
+        pending_reply_for_message[callback.from_user.id] = mid
+        await bot.send_message(callback.from_user.id, t("reply_request", callback.from_user.id))
+        await callback.answer()
+        return
+
+    # Reveal simulation
+    if data.startswith("reveal:"):
+        mid = int(data.split(":",1)[1])
+        await bot.send_message(callback.from_user.id, t("reveal_prompt", callback.from_user.id, price=REVEAL_PRICE_STARS))
+        await callback.answer()
+        return
+
+    # Report flow: ask reason
+    if data.startswith("report:"):
+        mid = int(data.split(":",1)[1])
+        pending_reply_for_message[callback.from_user.id] = f"report::{mid}"
+        await bot.send_message(callback.from_user.id, t("report_reason_prompt", callback.from_user.id))
+        await callback.answer()
+        return
+
+    # Appeal start from blocked user
+    if data == "appeal:start":
+        # allow only if blocked and not appealed before
+        blocked, permanent = is_blocked(callback.from_user.id)
+        if not blocked:
+            await bot.send_message(callback.from_user.id, "You are not blocked / Вы не заблокированы.")
+            await callback.answer()
+            return
+        if permanent:
+            await bot.send_message(callback.from_user.id, t("you_banned", callback.from_user.id))
+            await callback.answer()
+            return
+        # check if already appealed using 'appealed' flag on user
+        row = db_execute("SELECT appealed FROM users WHERE user_id = ?", (callback.from_user.id,), fetchone=True)
+        if row and row[0]:
+            await bot.send_message(callback.from_user.id, "Вы уже подавали апелляцию / You already appealed.")
+            await callback.answer()
+            return
+        pending_appeal_from_user[callback.from_user.id] = True
+        await bot.send_message(callback.from_user.id, t("appeal_prompt", callback.from_user.id))
+        await callback.answer()
+        return
+
+    # Admin actions: block/unblock/ban via callback_data like admin:block:12345
+    if data.startswith("admin:block:") or data.startswith("admin:unblock:") or data.startswith("admin:ban:") or data.startswith("admin:process_appeal:"):
+        # only admin allowed
+        if callback.from_user.id != ADMIN_ID:
+            await callback.answer("Only admin", show_alert=True)
+            return
+        parts = data.split(":")
+        action = parts[1]
+        target = int(parts[2])
+        if action == "block":
+            block_user(target, reason="Blocked by admin", permanent=0)
+            await bot.send_message(ADMIN_ID, t("block_confirm_admin", ADMIN_ID, uid=target))
+            await callback.answer("User blocked")
+            return
+        if action == "unblock":
+            unblock_user(target)
+            await bot.send_message(ADMIN_ID, t("unblock_confirm_admin", ADMIN_ID, uid=target))
+            await callback.answer("User unblocked")
+            return
+        if action == "ban":
+            block_user(target, reason="Banned by admin", permanent=1)
+            await bot.send_message(ADMIN_ID, t("ban_confirm_admin", ADMIN_ID, uid=target))
+            await callback.answer("User banned permanently")
+            return
+        if action == "process_appeal":
+            # parts: admin:process_appeal:<appeal_id>:<decision> where decision is accept/reject
+            appeal_id = int(parts[2])
+            decision = parts[3] if len(parts) > 3 else "reject"
+            # left simple: mark processed
+            mark_appeal_processed(appeal_id)
+            await bot.send_message(ADMIN_ID, f"Appeal {appeal_id} processed: {decision}")
+            await callback.answer("Appeal processed")
+            return
+
+    await callback.answer()  # fallback
+
+@dp.message()
+async def on_message(message: types.Message):
+    uid = message.from_user.id
+    text = (message.text or "").strip()
+    ensure_user(uid, message.from_user.username, message.from_user.first_name)
+
+    # If pending idea
+    if pending_idea_from_user.pop(uid, None):
+        save_idea(uid, text)
+        # notify admin
+        uname = f"@{message.from_user.username}" if message.from_user.username else "(no username)"
+        await safe_send(ADMIN_ID, f"💡 Idea from {uname} (ID {uid}):\n\n{text}")
+        await message.answer(t("idea_thanks", uid))
+        return
+
+    # If user is entering an appeal
+    if pending_appeal_from_user.pop(uid, None):
+        # save appeal and notify admin
+        save_id = save_appeal(uid, text)
+        # set appealed flag
+        db_execute("UPDATE users SET appealed = 1 WHERE user_id = ?", (uid,), commit=True)
+        await safe_send(ADMIN_ID, t("appeal_admin_notify", ADMIN_ID, uid=uid, username=f"@{message.from_user.username}" if message.from_user.username else "(no username)", appeal=text))
+        await message.answer(t("appeal_received_user", uid))
+        return
+
+    # If user is replying to a message (pending_reply_for_message)
+    pending = pending_reply_for_message.pop(uid, None)
+    if pending:
+        # report flow
+        if isinstance(pending, str) and pending.startswith("report::"):
+            mid = int(pending.split("::",1)[1])
+            add_report(mid, uid, text)
+            await message.answer(t("report_received_user", uid))
+            # notify admin about this single report
+            dbm = get_message(mid)
+            sender_id = dbm[1] if dbm else None
+            preview = (dbm[5][:200] + "...") if dbm and len(dbm[5])>200 else (dbm[5] if dbm else "")
+            uname = f"@{dbm[2]}" if dbm and dbm[2] else "(no username)"
+            await safe_send(ADMIN_ID, t("report_admin_notify", ADMIN_ID, mid=mid, sender_id=sender_id, username=uname, preview=preview, reason=text, reporter=uid))
+            # Now check unique reports against sender and if >=3 notify admin with block buttons
+            if sender_id:
+                unique_count = count_unique_reports_against_sender(sender_id)
+                if unique_count >= 3:
+                    rows = get_reports_for_sender(sender_id)
+                    msg = f"🚨 User {sender_id} has {unique_count} unique reports. Reports:\n"
+                    for r in rows:
+                        rid, rmid, reporter_id, reason, created_at, mtext = r
+                        msg += f"- Report #{rid} on message #{rmid} by {reporter_id}: {reason}\n  msg: {mtext[:120]}\n"
+                    # admin buttons: block/unblock/ban
+                    kb = InlineKeyboardMarkup(row_width=1)
+                    kb.add(InlineKeyboardButton("🔒 Block user", callback_data=f"admin:block:{sender_id}"),
+                           InlineKeyboardButton("🔓 Unblock user", callback_data=f"admin:unblock:{sender_id}"),
+                           InlineKeyboardButton("⛔ Ban permanently", callback_data=f"admin:ban:{sender_id}"))
+                    await safe_send(ADMIN_ID, msg, reply_markup=kb)
+            return
+
+        # normal reply flow
+        try:
+            mid = int(pending)
+            dbm = get_message(mid)
+            if not dbm:
+                await message.answer("Original message not found.")
+                return
+            sender_id = dbm[1]
+            # send anonymous reply to original sender
+            await safe_send(sender_id, t("reply_notification_to_sender", sender_id, reply=text),
+                            reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("💬 Reply", callback_data=f"reply_to_sender:{mid}")))
+            await message.answer(t("message_sent_confirm", uid))
+        except Exception as e:
+            logger.exception("Error in reply flow: %s", e)
+            await message.answer("Error sending reply.")
+        return
+
+    # If user is currently composing anonymous message to someone (came via link)
     if uid in pending_send_for_target:
         target_id = pending_send_for_target.pop(uid)
+        # check block
+        blocked, permanent = is_blocked(uid)
+        if blocked:
+            if permanent:
+                await message.answer(t("you_banned", uid))
+                return
+            else:
+                await message.answer(t("you_blocked", uid))
+                return
         sender_username = message.from_user.username or None
         sender_first_name = message.from_user.first_name or ""
-        mid = create_message_record(uid, sender_username, sender_first_name, target_id, text)
-        message.answer(t(uid, "sent_ok"))
-        human_text = t(target_id, "new_msg_notify", text=text, price=REVEAL_PRICE_STARS)
-        kb = make_receiver_keyboard(mid, user_id_for_lang=target_id)
-        sent = safe_send(target_id, human_text, reply_markup=kb)
-        if not sent:
-            logger.info(f"Message #{mid} saved but deliver failed.")
+        mid = create_message(uid, sender_username, sender_first_name, target_id, text)
+        await message.answer(t("message_sent_confirm", uid))
+        # notify receiver
+        kb = make_receiver_kb(mid, target_id)
+        await safe_send(target_id, t("new_msg_to_receiver", target_id, text=text), reply_markup=kb)
         return
 
-    message.answer(t(uid, "default_reply"))
+    # default fallback
+    await message.answer("Use /start to get your link or open menu.")
 
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith("share:"))
-def cb_share(call: types.CallbackQuery):
-    try:
-        target_uid = int(call.data.split(":", 1)[1])
-    except:
-        call.answer("Error", show_alert=True)
-        return
-    me = bot.get_me()
-    link = f"https://t.me/{me.username}?start={target_uid}"
-    bot.send_message(call.from_user.id, (f"Скопируйте ссылку:\n{link}" if get_user_lang(call.from_user.id)=="ru" else f"Copy link:\n{link}"))
-    call.answer()
-
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith("reply:"))
-def cb_reply(call: types.CallbackQuery):
-    message_id = int(call.data.split(":", 1)[1])
-    db_msg = get_message_by_id(message_id)
-    if not db_msg:
-        call.answer(get_user_lang(call.from_user.id)=="ru" and "Сообщение не найдено." or "Message not found.", show_alert=True)
-        return
-    pending_reply_for_message[call.from_user.id] = message_id
-    call.answer()
-    bot.send_message(call.from_user.id, t(call.from_user.id, "reply_prompt"))
-
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith("reveal:"))
-def cb_reveal(call: types.CallbackQuery):
-    message_id = int(call.data.split(":", 1)[1])
-    db_msg = get_message_by_id(message_id)
-    if not db_msg:
-        call.answer(get_user_lang(call.from_user.id)=="ru" and "Сообщение не найдено." or "Message not found.", show_alert=True)
-        return
-    call.answer()
-    confirm_kb = types.InlineKeyboardMarkup().add(
-        types.InlineKeyboardButton(f"{('Оплатить' if get_user_lang(call.from_user.id)=='ru' else 'Pay')} {REVEAL_PRICE_STARS}★ (симуляция)", callback_data=f"confirm_reveal:{message_id}")
-    )
-    bot.send_message(call.from_user.id, t(call.from_user.id, "reveal_confirm", price=REVEAL_PRICE_STARS), reply_markup=confirm_kb)
-
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith("confirm_reveal:"))
-def cb_confirm_reveal(call: types.CallbackQuery):
-    message_id = int(call.data.split(":", 1)[1])
-    db_msg = get_message_by_id(message_id)
-    if not db_msg:
-        call.answer(get_user_lang(call.from_user.id)=="ru" and "Сообщение не найдено." or "Message not found.", show_alert=True)
-        return
-    sender_username = db_msg[2]
-    sender_first_name = db_msg[3]
-    set_message_revealed(message_id)
-    if sender_username:
-        call.answer(get_user_lang(call.from_user.id)=="ru" and "Отправитель раскрыт!" or "Sender revealed!", show_alert=True)
-        bot.send_message(call.from_user.id, t(call.from_user.id, "revealed_username", name=sender_first_name or "-", username=sender_username),
-                         reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("Open profile", url=f"https://t.me/{sender_username}")))
-    else:
-        call.answer()
-        bot.send_message(call.from_user.id, t(call.from_user.id, "revealed_hidden"))
-
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith("report:"))
-def cb_report(call: types.CallbackQuery):
-    message_id = int(call.data.split(":", 1)[1])
-    pending_reply_for_message[call.from_user.id] = f"report::{message_id}"
-    call.answer()
-    bot.send_message(call.from_user.id, t(call.from_user.id, "report_prompt"))
-
-@dp.message_handler(lambda m: isinstance(pending_reply_for_message.get(m.from_user.id, None), str) and pending_reply_for_message[m.from_user.id].startswith("report::"), content_types=types.ContentTypes.TEXT)
-def handle_report_text(message: types.Message):
-    tag = pending_reply_for_message.pop(message.from_user.id)
-    _, mid_str = tag.split("::", 1)
-    message_id = int(mid_str)
-    reason = message.text.strip()
-    save_report(message_id, message.from_user.id, reason)
-    db_msg = get_message_by_id(message_id)
-    if db_msg and ADMIN_ID:
-        sender_id = db_msg[1]
-        sender_username = db_msg[2] or "(скрыт)"
-        text_preview = db_msg[5][:300]
-        report_text = (f"🚨 Жалоба на сообщение #{message_id}\nОтправитель (ID): {sender_id}\nUsername: {sender_username}\nТекст: {text_preview}\nПричина: {reason}\nОтправитель жалобы: {message.from_user.id}")
-        safe_send(ADMIN_ID, report_text)
-    message.answer(t(message.from_user.id, "report_ok"))
-
-@dp.message_handler(commands=["stats"])
-def cmd_stats(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        message.answer("Only admin")
-        return
-    total = db_execute("SELECT COUNT(*) FROM messages", fetchone=True)[0]
-    unrevealed = db_execute("SELECT COUNT(*) FROM messages WHERE revealed = 0", fetchone=True)[0]
-    message.answer(f"Total messages: {total}\nUnrevealed: {unrevealed}")
-
-@dp.message_handler(commands=["admin_ideas"])
-def cmd_admin_ideas(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        message.answer("Only admin")
-        return
-    rows = db_execute("SELECT id, from_user, text, created_at FROM ideas ORDER BY created_at DESC LIMIT 50", fetchall=True) or []
-    if not rows:
-        message.answer("No ideas")
-        return
-    out = []
-    for r in rows:
-        when = datetime.fromtimestamp(r[3]).strftime("%Y-%m-%d %H:%M")
-        out.append(f"#{r[0]} {when} — from {r[1]}\n{r[2][:200]}")
-    message.answer("\n\n".join(out))
-
+# ----------------------------
+# Startup
+# ----------------------------
 if __name__ == "__main__":
     init_db()
-    logger.info("Starting Whosent bot...")
-    executor.start_polling(dp, skip_updates=True)
+    logger.info("Bot starting...")
+    dp.run_polling(bot)
